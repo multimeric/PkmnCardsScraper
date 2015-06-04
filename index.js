@@ -18,50 +18,9 @@ function makeUrl(url, query) {
     return url + "?" + qs.stringify(query);
 }
 
-function cardIdFromUrl(url){
-   return url.match(new RegExp("/(\\w+/\\w+)/$"))[1];
+function cardIdFromUrl(url) {
+    return url.match(new RegExp("/(\\w+/\\w+)/$"))[1];
 }
-
-/**
- * Scrapes the page at the given URL, and returns an object {cards, numPages} where cards is an array of card objects
- * and numPages is the number of pages returned from this query
- */
-function scrapeSearchPage(pageUrl) {
-
-    return co(function *() {
-
-        var cards = [];
-
-        //Load the HTML page
-        var $ = cheerio.load(yield request(pageUrl));
-
-        //For each card, scrape some data
-        $("#cardResults li").each(co(function* (i, el) {
-            var $card = $(el);
-
-            //Just scrape the database URL and the image for now
-            var url = Url.resolve(SCRAPE_URL, $card.find("a").attr("href"));
-            var card = {
-                url: url,
-                image: Url.resolve(SCRAPE_URL, $card.find("img").attr("src")),
-                id: cardIdFromUrl(url)
-            };
-
-            cards.push(card);
-        }));
-
-        //Work out how many pages in total there are
-        var totalText = $('#cards-load-more>div>span').text();
-        var numPages = parseInt(/\d of (\d+)/.exec(totalText)[1]);
-
-        return {
-            numPages: numPages,
-            cards: cards
-        };
-
-    })();
-}
-
 
 /**
  * Calls the callback function on each energy
@@ -86,193 +45,233 @@ function formatText(str) {
     return trim(str.replace(/\r?\n|\r/, " "));
 }
 
-function scrapeCard(url) {
+function getBasicType(type) {
+    var lower = type.toLowerCase();
 
-    return co(function *() {
-        var card = {};
+    if (lower.indexOf("trainer") != -1)
+        return "Trainer";
+    else if (lower.indexOf("energy") != -1)
+        return "Energy";
+    return "Pokemon";
 
-        //Load the HTML page from the URL
-        var $ = cheerio.load(yield request(url));
+}
 
-        //Add the ID because we don't need the actual page for that
-        card.id = cardIdFromUrl(url);
+function readFirstParagraph($topRow, card, $) {
+    var topRow = $topRow.contents().filter(function () {
+        return this.nodeType == 3;
+    });
+    card.specificType = $(_.last(topRow)).text().split(" - ")[0];
+    card.basicType = getBasicType(card.specificType);
+    var links = $topRow.find("a");
+    if (links.length > 1)
+        card.evolvesFrom = $(links[1]).text();
 
-        //Scrape the card name
-        var $header = $(".card-description");
-        card.name = $header.find("h1").text();
+    //If it's a pokemon, get its HP and colour
+    if (card.basicType == "Pokemon") {
+        var split = $(topRow[0]).text().split(" - ");
+        card.color = split[1];
+        card.hp = parseInt(split[2]);
+    }
+}
 
-        //Scrape the type and HP
-        var $basicInfo = $(".card-basic-info");
-
-        //Scrape the image
-        var $img = $(".card-image>img");
-        card.image = Url.resolve(url, $img.attr('src'));
-
-        //Scrape the type and evolution
-        var $type = $basicInfo.find(".card-type");
-        card.type = $type.find("h2").text();
-        if (card.type.indexOf("Trainer") != -1)
-            card.superType = "Trainer";
-        else if (card.type.indexOf("Energy") != -1)
-            card.superType = "Energy";
-        else if (card.type.indexOf("Pokémon") != -1)
-            card.superType = "Pokémon";
-
-        //If it's a trainer or anything non-pokemon, just scrape the text
-        if (card.superType == "Trainer" || card.superType == "Energy") {
-            card.text = formatText($(".pokemon-abilities").text());
-            return card;
-        }
-
-        var $evolved_from = $type.find("h4");
-        if ($evolved_from.length > 0)
-            card.evolvesFrom = trim($evolved_from.find("a").text());
-
-        var hp_text = $basicInfo.find(".card-hp").text();
-        card.hp = parseInt(/\d+/.exec(hp_text)[0]);
-
-        //Scrape the passive ability/poke body/poke power if they have one
-        var passive_name = $(".pokemon-abilities h3");
-        if (passive_name.length > 0 && passive_name.next()[0].name == "p") {
-            card.passive = {
-                name: passive_name.find("div:last-child").text(),
-                text: formatText(passive_name.next().text())
-            };
-        }
-
-        //Scrape each ability sequentially
+function readAbility($p, card, $) {
+    if ('abilities' in card == false)
         card.abilities = [];
-        card.rules = []; //Rules are things like the EX rule
-        var $abilities = $(".pokemon-abilities .ability");
-        $abilities.each(function (i, el) {
-            var $ability = $(el);
-            var ability = {
-                cost: []
-            };
 
-            //Scrape the ability name
-            var $name = $ability.find("h4.left");
-            //If there is no name, it's a rule
-            if ($name.length == 0) {
-                card.rules.push(formatText($ability.text()));
-                return;
-            }
-            ability.name = $name.text();
+    var text = $p.text().replace("Ability: ", "");
+    var split = text.split("\n");
+    card.abilities.push({
+        name: split[0],
+        text: split[1]
+    });
+}
 
+function readAncientTrait($p, card, $) {
+    if ('traits' in card == false)
+        card.traits = [];
 
-            //Scrape the cost
-            var $energies = $ability.find("ul.left li");
-            $energies.each(function (i, energy) {
-                var $energy = $(energy);
-                ability.cost.push($energy.attr("title"));
-            });
+    var split = $p.text().split(": ");
+    card.traits.push({
+        name: split[0],
+        text: split[1]
+    });
+}
 
-            //Scrape the ability damage
-            var $damage = $ability.find("span.right.plus");
-            ability.damage = $damage.text();
+function readAttack($p, card, $) {
+    //Add the attacks array to the card
+    if ('attacks' in card == false)
+        card.attacks = [];
 
-            //Scrape the ability text
-            var $text = $ability.find(">p");
-            ability.text = formatText($text.text());
+    //Setup common variables
+    var attack = {
+        cost: []
+    };
+    var text = $p.text();
 
-            //Add it to the card
-            card.abilities.push(ability);
-        });
+    //Add cost
+    var re = /(\[\w])/g;
+    var match;
+    while ((match = re.exec(text)) !== null) {
+        attack.cost.push(match[0]);
+    }
 
-        //Scrape the colour
-        var colourUrl = $basicInfo.find(".right>a").attr("href");
-        if (colourUrl) {
-            var queryString = Object.keys(Url.parse(colourUrl, true).query)[0];
-            card.color = capitalize(/card-(.*)/.exec(queryString)[1]);
-        }
-        //If no colour icon is present, try to guess it from the abilities
-        else {
-            //An array of energy:count pairs
-            var pairs = _.chain(card.abilities)
-                .map("cost")
-                .flatten()
-                .countBy(function (energy) {
-                    return energy;
-                }).pairs()
-                .value();
+    //Add the attack text and possibly damage
+    var attackText = /: (.+)/.exec(text)[1];
+    if (text.indexOf("damage")) {
 
-            card.color = _.chain(pairs)
-                .max(function (pair) {
-                    return pair[1];
-                })
-                .value()[0];
-        }
+        //The first sentence involves damage
+        var split = attackText.split(". ");
+        var damage = /(\d+)[x+]? damage/.exec(split[0]);
+        if (damage)
+            attack.damage = damage[1];
 
-        //Scrape the other stats
-        var $stats = $(".pokemon-stats");
+        //The remaining text is the attack's text
+        attack.text = attackText.substring(attackText.indexOf('. ') + 1);
+    }
+    else
+        attack.text = attackText;
 
-        card.weaknesses = [];
-        var $weakness = $stats.find(".stat:contains(Weakness)");
-        scrapeEnergies($weakness.find("ul.card-energies"), $, function (type, $) {
-            card.weaknesses.push({
-                type: type,
-                value: trim($.text())
-            });
-        });
+    //Attack name
+    attack.name = /(\w[\w\s]+):/.exec(text)[1];
 
-        card.resistances = [];
-        var $resistance = $stats.find(".stat:contains(Resistance)");
-        scrapeEnergies($resistance.find("ul.card-energies"), $, function (type, $) {
-            card.resistances.push({
-                type: type,
-                value: trim($.text())
-            });
-        });
+    card.attacks.push(attack);
+}
 
-        var $retreat = $stats.find(":contains(Retreat Cost)");
-        card.retreatCost = $retreat.find(".energy").length;
+function readSetDetails($p, card, $) {
+    var split = $p.text().split(" - ");
+    card.set = split[0];
+    card.setId = split[1];
+    card.rarity = split[2];
+}
 
-        return card;
-    })();
+function readWeaknessResistance($p, card, $) {
+    var lines = _($p.contents()).filter(function (el) {
+        return el.nodeType == 3;
+    }).map(function (el) {
+        var $el = $(el);
+        return /: (.+)/.exec($el.text())[1];
+    }).value();
+
+    var weakness = lines[0].split(" ");
+    card.weakness = {
+        type: weakness[0],
+        value: weakness[1]
+    };
+    var resistance = lines[0].split(" ");
+    card.resistance = {
+        type: resistance[0],
+        value: resistance[1]
+    };
+    card.retreatCost = lines[2];
+}
+
+function readText($p, card, $) {
+    //Add the text array to the card
+    if ('text' in card == false)
+        card.text = [];
+
+    card.text.push($p.text());
+}
+
+function readCardRule($p, card, $) {
+    //Add the text array to the card
+    if ('rules' in card == false)
+        card.rules = [];
+
+    var split = $p.text().split(": ");
+    card.rules.push({
+        name: split[0],
+        text: split[1]
+    });
+}
+
+function readFlavourText($p, card, $) {
+    card.flavourText = $p.text();
+}
+
+function readCardParagraphs($p, card, $) {
+    $p.each(function (i, el) {
+        var $el = $(el);
+        var text = $el.text();
+        var isPokemon = card.basicType == "Pokemon";
+
+        if (i == 0)
+            readFirstParagraph($el, card, $);
+        else if (isPokemon && /Ability:/.test(text))
+            readAbility($el, card, $);
+        else if (isPokemon && /\[.+]/.test(text))
+            readAttack($el, card, $);
+        else if (isPokemon && /Resistance/.test(text))
+            readWeaknessResistance($el, card, $);
+        else if (isPokemon && /^. \w+:/.test(text))
+            readAncientTrait($el, card, $);
+        else if (isPokemon && text.toLowerCase().indexOf("rule") != -1)
+            readCardRule($el, card, $);
+        else if (text.indexOf("Illus") != -1)
+            readSetDetails($el, card, $);
+        else if ($el.has("em").length)
+            readFlavourText($el, card, $);
+        else if (text.indexOf(" - ") != -1)
+            readSetDetails($el, card, $);
+        else
+            readText($el, card, $)
+    });
+}
+
+/**
+ * Scrapes the given jQuery element containing a card's data
+ * @returns A card object
+ */
+function scrapeCard(element, $) {
+    element = $(element);
+    var card = {};
+
+    //Get the card images
+    var $images = element.find(".scan.left");
+    card.smallImg = $images.find("img").attr("src");
+    card.largeImg = $images.find("a").attr("href");
+
+    var $card = element.find(".card");
+
+    //Get the title and set name from the title bar
+    var titleArray = $card.find("h2.entry-title").text().match(/(.+) \((.+)\)/);
+    card.name = titleArray[1];
+    card.set = titleArray[2];
+
+    //Get the type
+    var $p = $card.find(".tabs-wrap [id^=text-]>p");
+    readCardParagraphs($p, card, $);
+
+    return card;
 }
 
 /**
  * Scrapes the Pokemon TCG database
- * @param query The query string to use for the search.
- * @param scrapeDetails True if you want to return the card data, false if you just want the URLs
+ * @param query The query string to use for the search. Defaults to a query string that will return all cards
  * @returns {*}
  */
-function scrapeAll(query, scrapeDetails) {
+function scrapeAll(query) {
+    query = query || {
+            s: null,
+            display: "card",
+            sort: "date"
+        };
 
     return co(function *() {
-        //By default, scrape the card details
-        scrapeDetails = scrapeDetails === undefined ? true : scrapeDetails;
 
-        //Load the HTML page
-        process.stdout.write("Scraping initial page...");
-        var scrapeURL = makeUrl(SCRAPE_URL, query);
-        var search = yield scrapeSearchPage(scrapeURL);
-        process.stdout.write("Done!\n");
+        var nextUrl = "http://pkmncards.com/?" +  qs.stringify(query);
+        var cards = [];
 
-        //Recurring variables
-        var cards = search.cards;
-        var i;
-
-        //Scrape all of the pages sequentially;
-        process.stdout.write('Scraping card URLs...\n');
-        for (i = 2; i <= search.numPages; i++) {
-            process.stdout.write('   Scraping page ' + i + '...');
-            var scrapeURL = makeUrl(Url.resolve(SCRAPE_URL, i.toString()), query);
-            var results = yield scrapeSearchPage(scrapeURL);
-            cards = cards.concat(results.cards);
-            process.stdout.write('Done!\n');
-        }
-
-        //Scrape all of the cards sequentially if requested
-        if (scrapeDetails) {
-            process.stdout.write('Scraping card details...\n');
-            for (i = 0; i < cards.length; i++) {
-                var card = cards[i];
-                process.stdout.write('   Scraping card ' + card.url);
-                _.assign(card, yield scrapeCard(card));
-                process.stdout.write('Done!\n')
-            }
-        }
+        do {
+            var $ = cheerio.load(yield request(nextUrl));
+            nextUrl = $($(".search-nav .right a")[0]).attr("href");
+            var cardsEls = $(".pkmn_card");
+            cardsEls.each(function (i, v) {
+                var card = scrapeCard(v, $);
+                cards.push(card);
+            });
+            console.log("Scraped " + cards.length + " cards.");
+        } while (nextUrl);
 
         return cards;
     })();
@@ -280,6 +279,5 @@ function scrapeAll(query, scrapeDetails) {
 
 module.exports = {
     scrapeAll: scrapeAll,
-    scrapeCard: scrapeCard,
-    scrapeSearchPage: scrapeSearchPage
+    scrapeCard: scrapeCard
 };
