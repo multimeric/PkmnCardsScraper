@@ -8,42 +8,8 @@ var request = require('request-promise');
 var cheerio = require('cheerio');
 var Promise = require('bluebird');
 var co = Promise.coroutine;
-var trim = require('trim');
-var Url = require('url');
 var qs = require('querystring');
-var capitalize = require('capitalize');
 var _ = require('lodash');
-
-function makeUrl(url, query) {
-    return url + "?" + qs.stringify(query);
-}
-
-function cardIdFromUrl(url) {
-    return url.match(new RegExp("/(\\w+/\\w+)/$"))[1];
-}
-
-/**
- * Calls the callback function on each energy
- * @param $el the jQuery element to start scraping from
- * @param func called with (energy, $), where energy is the energy type (Fire etc.) and $ is a jQuery element for this energy
- */
-function scrapeEnergies(el, $, func) {
-    var $el = $(el);
-
-    $el.find("li").each(function (i, val) {
-        var $val = $(val);
-        var type = $val.attr("title");
-        func(type, $val);
-    });
-}
-
-/**
- * Removes newlines from and trims a string
- * @param str
- */
-function formatText(str) {
-    return trim(str.replace(/\r?\n|\r/, " "));
-}
 
 function getBasicType(type) {
     var lower = type.toLowerCase();
