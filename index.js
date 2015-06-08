@@ -1,15 +1,15 @@
 "use strict";
 
 //Constants
-var SCRAPE_URL = "http://www.pokemon.com/us/pokemon-tcg/pokemon-cards/";
+const SCRAPE_URL = "http://www.pokemon.com/us/pokemon-tcg/pokemon-cards/";
 
 //Requires
-var request = require('request-promise');
-var cheerio = require('cheerio');
-var Promise = require('bluebird');
-var co = Promise.coroutine;
-var qs = require('querystring');
-var _ = require('lodash');
+const request = require('request-promise');
+const cheerio = require('cheerio');
+const Promise = require('bluebird');
+const co = Promise.coroutine;
+const qs = require('querystring');
+const _ = require('lodash');
 
 function getBasicType(type) {
     var lower = type.toLowerCase();
@@ -22,29 +22,109 @@ function getBasicType(type) {
 
 }
 
+/**
+ * Divides the paragraph into a 2D array of lines and then sections
+ * @param el
+ * @param $
+ * @returns {*}
+ */
+function getLines(el, $) {
+    var $el = $(el);
+    var counter = 0; //The current group of text nodes
+
+    // * Group the nodes into groups divided by <br>
+    //Then map into text
+    return _($el.contents())
+
+        //Group the nodes into groups divided by the <br>
+        .groupBy(function (el) {
+            if (el.tagName == "br") {
+                counter++;
+                return "<br>";
+            }
+            return counter;
+        })
+
+        //Remove the br nodes themselves
+        .omit("<br>")
+
+        //Convert to an array (groupBy returns an object)
+        .toArray()
+
+        //Convert each sub array into a string
+        .map(function (array) {
+
+            //Map the elements into text and join them with spaces then split them by hyphens
+            return _(array)
+                .map(function (el) {
+                    return $(el).text().trim();
+                })
+                .join(" ")
+                .split(" -")
+                .map(function (str) {
+                    return str.trim();
+                });
+
+        })
+
+        //Evaluate
+        .value();
+}
+
 function readFirstParagraph($topRow, card, $) {
-    var topRow = $topRow.contents().filter(function () {
-        return this.nodeType == 3;
-    });
-    card.specificType = $(_.last(topRow)).text().split(" - ")[0];
-    card.basicType = getBasicType(card.specificType);
+
+    //Divide the paragraph into lines, further divided by hyphens (an array of arrays)
+    var lines = getLines($topRow, $);
+
+    //Quit if there's only one element
+    if (lines.length == 1 && lines[0].length == 1)
+        return;
+
+
+    //This stuff requires a second row which isn't present in some cards
+    if (lines.length > 1) {
+
+        //Get the (the first part of the second row)
+        card.specificType = lines[1][0];
+        card.basicType = getBasicType(card.specificType);
+
+        //If it's anything special (e.g. Team Plasma), mark it
+        if ((card.evolvesFrom && lines[1].length > 2 ) || (!card.evolvesFrom && lines[1].length > 1)) {
+            if ('specialTags' in card == false)
+                card.specialTags = [];
+            card.specialTags.push(_.last(lines[1]));
+        }
+    }
+
+    //The last link is the evolution
     var links = $topRow.find("a");
     if (links.length > 1)
         card.evolvesFrom = $(links[1]).text();
 
     //If it's a pokemon, get its HP and colour
     if (card.basicType == "Pokemon") {
-        var split = $(topRow[0]).text().split(" - ");
-        card.color = split[1];
-        card.hp = parseInt(split[2]);
+
+        //The HP is always the last entry
+        var hpMatch = /\d+/.exec(_.last(lines[0]));
+        if (hpMatch)
+            card.hp = parseInt(hpMatch[0]);
+
+        //If there are 3 things on the first line, the second one is the color
+        if (lines[0].length > 2)
+            card.colors = lines[0][1].split(", ");
+    }
+    else if (card.basicType == 'Trainer'){
+        card.specificType = lines[1][1];
     }
 }
+
+const abilityRegex = /(Ability|Pokémon Power|Poké-Body|Poké-Power): /;
 
 function readAbility($p, card, $) {
     if ('abilities' in card == false)
         card.abilities = [];
 
-    var text = $p.text().replace("Ability: ", "");
+    var text = $p.text().replace(abilityRegex, "");
     var split = text.split("\n");
     card.abilities.push({
         name: split[0],
@@ -63,6 +143,7 @@ function readAncientTrait($p, card, $) {
     });
 }
 
+const attackRegex = /[:\.]\s(.+)/;
 function readAttack($p, card, $) {
     //Add the attacks array to the card
     if ('attacks' in card == false)
@@ -82,23 +163,23 @@ function readAttack($p, card, $) {
     }
 
     //Add the attack text and possibly damage
-    var attackText = /: (.+)/.exec(text)[1];
-    if (text.indexOf("damage")) {
+    var attackText = attackRegex.exec(text)[1];
+    if (text.indexOf("damage") != -1) {
 
         //The first sentence involves damage
         var split = attackText.split(". ");
         var damage = /(\d+)[x+]? damage/.exec(split[0]);
         if (damage)
-            attack.damage = damage[1];
+            attack.damage = parseInt(damage[1]);
 
         //The remaining text is the attack's text
-        attack.text = attackText.substring(attackText.indexOf('. ') + 1);
+        attack.text = attackText.substring(attackText.indexOf('.') + 1);
     }
     else
         attack.text = attackText;
 
     //Attack name
-    attack.name = /(\w[\w\s]+):/.exec(text)[1];
+    attack.name = /(\w[\w\s]+)[:\.]/.exec(text)[1];
 
     card.attacks.push(attack);
 }
@@ -123,12 +204,28 @@ function readWeaknessResistance($p, card, $) {
         type: weakness[0],
         value: weakness[1]
     };
-    var resistance = lines[0].split(" ");
-    card.resistance = {
-        type: resistance[0],
-        value: resistance[1]
-    };
-    card.retreatCost = lines[2];
+
+    var weakness = lines[0];
+    var value = /[-x]\d+/.exec(weakness);
+    if (value) {
+        var types = weakness.slice(0, value.index - 1).split(", ");
+        card.weakness = {
+            types: types,
+            value: value[0]
+        };
+    }
+
+    var resistance = lines[1];
+    var value = /[-x]\d+/.exec(resistance);
+    if (value) {
+        var types = resistance.slice(0, value.index - 1).split(", ");
+        card.resistance = {
+            types: types,
+            value: value[0]
+        };
+    }
+
+    card.retreatCost = parseInt(lines[2]);
 }
 
 function readText($p, card, $) {
@@ -144,11 +241,8 @@ function readCardRule($p, card, $) {
     if ('rules' in card == false)
         card.rules = [];
 
-    var split = $p.text().split(": ");
-    card.rules.push({
-        name: split[0],
-        text: split[1]
-    });
+    // var split = $p.text().split(": ");
+    card.rules.push($p.text());
 }
 
 function readFlavourText($p, card, $) {
@@ -163,11 +257,11 @@ function readCardParagraphs($p, card, $) {
 
         if (i == 0)
             readFirstParagraph($el, card, $);
-        else if (isPokemon && /Ability:/.test(text))
+        else if (isPokemon && abilityRegex.test(text))
             readAbility($el, card, $);
-        else if (isPokemon && /\[.+]/.test(text))
+        else if (isPokemon && /\^[(.+)?]/.test(text))
             readAttack($el, card, $);
-        else if (isPokemon && /Resistance/.test(text))
+        else if (isPokemon && /Resistance:/.test(text) && /Weakness:/.test(text) && /Retreat Cost:/.test(text))
             readWeaknessResistance($el, card, $);
         else if (isPokemon && /^. \w+:/.test(text))
             readAncientTrait($el, card, $);
@@ -179,6 +273,10 @@ function readCardParagraphs($p, card, $) {
             readFlavourText($el, card, $);
         else if (text.indexOf(" - ") != -1)
             readSetDetails($el, card, $);
+        else if (isPokemon && attackRegex.test(text))
+            readAttack($el, card, $);
+        else if (isPokemon)
+            readCardRule($el, card, $);
         else
             readText($el, card, $)
     });
@@ -225,7 +323,7 @@ function scrapeAll(query) {
 
     return co(function *() {
 
-        var nextUrl = "http://pkmncards.com/?" +  qs.stringify(query);
+        var nextUrl = "http://pkmncards.com/?" + qs.stringify(query);
         var cards = [];
 
         do {
@@ -233,7 +331,13 @@ function scrapeAll(query) {
             nextUrl = $($(".search-nav .right a")[0]).attr("href");
             var cardsEls = $(".pkmn_card");
             cardsEls.each(function (i, v) {
-                var card = scrapeCard(v, $);
+                var card;
+                try {
+                    card = scrapeCard(v, $);
+                }
+                catch (ex) {
+                    console.log("Error scraping " + $(v).find("h2").text() + ". " + ex.stack)
+                }
                 cards.push(card);
             });
             console.log("Scraped " + cards.length + " cards.");
