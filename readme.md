@@ -72,38 +72,6 @@ This will print an array of cards like this:
 ]
 ```
 
-   "traits":[
-         {
-            "name":"Δ Evolution",
-            "text":"You may play this card from your hand to evolve a Pokémon during your first turn or the turn you play that Pokémon."
-         }
-      ],
-      "abilities":[
-         {
-            "name":"Clear Humming",
-            "text":"Each of your [C] Pokémon has no Weakness."
-         }
-      ],
-      "attacks":[
-         {
-            "cost":[
-               "[C]",
-               "[C]"
-            ],
-            "damage":"30",
-            "text":"30 damage.",
-            "name":"Wing Attack"
-         }
-      ],
-      "weakness":{
-         "type":"Lightning",
-         "value":"x2"
-      },
-      "resistance":{
-         "type":"Lightning",
-         "value":"x2"
-      },
-
 ## API
 
 The TCG scraper exposes only one main function: `scrapeAll(query)`
